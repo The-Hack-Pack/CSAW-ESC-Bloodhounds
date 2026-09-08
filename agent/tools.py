@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+The toolkit the agent is allowed to call.
+
+Design rule from the AIxCC post-mortems: every tool returns *evidence*, never
+a verdict. The model reasons; the tools ground. A finding is only a finding
+once validate_poc() returns crashed=True.
+"""
+import json
+import os
+import subprocess
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TWIN = os.path.join(ROOT, "host_twin")
+
+
+def _run(cmd, cwd=None, timeout=120, stdin_bytes=None):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, timeout=timeout, input=stdin_bytes,
+                           capture_output=True)
+        return {
+            "rc": p.returncode,
+            "stdout": p.stdout.decode(errors="replace")[-8000:],
+            "stderr": p.stderr.decode(errors="replace")[-8000:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"rc": -1, "stdout": "", "stderr": f"timeout after {timeout}s"}
+
+
+# ----------------------------------------------------------------- inspection
+def read_source(path: str, start: int = 1, end: int = 400) -> str:
+    """Read a slice of a source file. Paths are relative to the repo root."""
+    full = os.path.normpath(os.path.join(ROOT, path))
+    if not full.startswith(ROOT):
+        return "error: path escapes repo root"
+    with open(full) as f:
+        lines = f.readlines()
+    sel = lines[max(0, start - 1):end]
+    return "".join(f"{i:5d}\t{l}" for i, l in enumerate(sel, start=max(1, start)))
+
+
+def list_files() -> str:
+    out = []
+    for base, _, files in os.walk(ROOT):
+        if any(s in base for s in (".git", "__pycache__")):
+            continue
+        for f in files:
+            out.append(os.path.relpath(os.path.join(base, f), ROOT))
+    return "\n".join(sorted(out))
+
+
+# -------------------------------------------------------------------- dynamic
+def build(target: str = "all") -> dict:
+    """Build the host twin. target: all|target_tsan|target_asan|fuzz_stdin."""
+    return _run(["make", "-s", target], cwd=TWIN)
+
+
+def run_tsan(iters: int = 40, widen: int = 1) -> dict:
+    """Run the concurrent workload under ThreadSanitizer. Returns raw output."""
+    return _run([os.path.join(TWIN, "target_tsan"), "race", str(iters), str(widen)])
+
+
+def run_interleaving(iters: int = 20, widen: int = 1) -> dict:
+    """Run under ASan with the scheduler window widened -- turns a race into a
+    deterministic crash if one exists."""
+    return _run([os.path.join(TWIN, "target_asan"), "race", str(iters), str(widen)])
+
+
+def validate_poc(poc_hex: str) -> dict:
+    """THE GATE. Feed a candidate input to the ASan harness. A finding without
+    crashed=True is a hypothesis, not a vulnerability."""
+    data = bytes.fromhex(poc_hex)
+    r = _run([os.path.join(TWIN, "fuzz_stdin")], stdin_bytes=data)
+    combined = r["stdout"] + r["stderr"]
+    crashed = "AddressSanitizer" in combined or r["rc"] < 0
+    return {
+        "crashed": crashed,
+        "signal_or_rc": r["rc"],
+        "sanitizer_report": combined[:4000] if crashed else "",
+    }
+
+
+# ------------------------------------------------------------------- symbolic
+def symbolic_solve(input_len: int = 64) -> dict:
+    """Ask angr for an input reaching the parse_config memcpy with an
+    oversized length. Use when fuzzing stalls on a magic value."""
+    return _run(["python3", os.path.join(ROOT, "agent", "solve_parse_config.py"),
+                 os.path.join(TWIN, "target_plain"), str(input_len)], timeout=600)
+
+
+# ------------------------------------------------------------- tool schemas
+SCHEMAS = [
+    {"name": "list_files", "description": "List every file in the target repo.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "read_source", "description": "Read numbered lines from a source file.",
+     "input_schema": {"type": "object", "properties": {
+         "path": {"type": "string"}, "start": {"type": "integer"},
+         "end": {"type": "integer"}}, "required": ["path"]}},
+    {"name": "build", "description": "Build the instrumented binaries.",
+     "input_schema": {"type": "object", "properties": {"target": {"type": "string"}}}},
+    {"name": "run_tsan", "description": "Run the workload under ThreadSanitizer to surface data races.",
+     "input_schema": {"type": "object", "properties": {
+         "iters": {"type": "integer"}, "widen": {"type": "integer"}}}},
+    {"name": "run_interleaving", "description": "Run under ASan with a widened race window to turn a race into a deterministic crash.",
+     "input_schema": {"type": "object", "properties": {
+         "iters": {"type": "integer"}, "widen": {"type": "integer"}}}},
+    {"name": "symbolic_solve", "description": "Use angr to solve for an input that reaches the parse_config memcpy with an oversized length.",
+     "input_schema": {"type": "object", "properties": {"input_len": {"type": "integer"}}}},
+    {"name": "validate_poc", "description": "Required before reporting any finding. Runs a hex-encoded input against the ASan harness and reports whether it actually crashed.",
+     "input_schema": {"type": "object", "properties": {"poc_hex": {"type": "string"}},
+                      "required": ["poc_hex"]}},
+]
+
+DISPATCH = {
+    "list_files": lambda **k: list_files(),
+    "read_source": read_source,
+    "build": build,
+    "run_tsan": run_tsan,
+    "run_interleaving": run_interleaving,
+    "symbolic_solve": symbolic_solve,
+    "validate_poc": validate_poc,
+}
+
+
+def call(name: str, args: dict):
+    fn = DISPATCH.get(name)
+    if fn is None:
+        return {"error": f"unknown tool {name}"}
+    try:
+        return fn(**args)
+    except Exception as e:  # tools must never kill the loop
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+if __name__ == "__main__":
+    print(json.dumps(call("run_tsan", {"iters": 40, "widen": 1}), indent=2)[:1500])

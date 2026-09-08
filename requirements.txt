@@ -1,0 +1,12 @@
+# Verified working together on Ubuntu 24.04 / Python 3.12.
+# angr's sub-packages must all share a version or the VEX lifter mismatches.
+angr==9.3.4
+archinfo==9.3.4
+claripy==9.3.4
+cle==9.3.4
+pyvex==9.3.4
+capstone==5.0.9
+z3-solver==4.13.0.0
+
+# Agent layer
+anthropic>=0.40,<1.0

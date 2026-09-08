@@ -1,0 +1,82 @@
+# Requires Compose v2 (`docker compose`, not `docker-compose`) for the
+# service-level `cpus:` key.
+#
+#   docker compose build analysis
+#   docker compose run --rm analysis bash scripts/run_all.sh
+#   docker compose run --rm agent
+
+services:
+  # ---------------------------------------------------------------- analysis
+  # Host twin, sanitizers, fuzzers, angr. This is the one you live in.
+  analysis:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        UID: "${UID:-1001}"
+        GID: "${GID:-1001}"
+    image: esc26/analysis:latest
+    volumes:
+      - ..:/work
+    working_dir: /work
+
+    # Sanitizers call personality() to disable ASLR; the default seccomp
+    # profile blocks it and ASan/TSan die at startup. Without this the
+    # container reports "no bugs" forever.
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE          # gdb, and sanitizer symbolization
+
+    # Race reproducibility is sensitive to core count. Pin it so a result is
+    # comparable across machines -- an unpinned container makes your
+    # time-to-crash numbers meaningless.
+    cpus: "4"
+    mem_limit: 8g
+
+    # angr on a large binary will happily eat every core.
+    environment:
+      OMP_NUM_THREADS: "1"
+    stdin_open: true
+    tty: true
+
+  # ------------------------------------------------------------------- agent
+  # Same image, different entrypoint. Split out so the API key is scoped to
+  # the one service that needs it and never lands in the fuzzing container.
+  agent:
+    extends:
+      service: analysis
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}"
+      OMP_NUM_THREADS: "1"
+    working_dir: /work/agent
+    command: ["python3", "run_agent.py", "--budget", "25"]
+
+  # ------------------------------------------------------------------- esp32
+  # Firmware build + qemu-system-xtensa. UNVERIFIED -- see Dockerfile.esp32.
+  esp32:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.esp32
+      args:
+        IDF_VERSION: "v5.3"
+    image: esc26/esp32:latest
+    volumes:
+      - ..:/work
+      - esp32-build:/work/firmware/build   # keep build cache out of the mount
+    working_dir: /work/firmware
+
+    # Uncomment to flash or debug the real board once you have the kit.
+    # devices:
+    #   - "/dev/ttyUSB0:/dev/ttyUSB0"
+    # group_add:
+    #   - dialout
+
+    # gdbstub for the interleaving driver (README step 13).
+    ports:
+      - "1234:1234"
+    stdin_open: true
+    tty: true
+
+volumes:
+  esp32-build:

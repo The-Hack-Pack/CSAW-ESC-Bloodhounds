@@ -1,0 +1,14 @@
+# Build context is the repo root (see docker-compose.yml context: ..).
+.git
+**/__pycache__
+**/*.pyc
+host_twin/target_tsan
+host_twin/target_asan
+host_twin/target_plain
+host_twin/fuzz_stdin
+host_twin/fuzz_libfuzzer
+host_twin/fuzz_afl
+host_twin/crash-*
+firmware/build
+firmware/sdkconfig.old
+agent/findings.json

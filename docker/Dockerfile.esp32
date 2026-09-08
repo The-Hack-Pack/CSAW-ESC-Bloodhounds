@@ -1,0 +1,32 @@
+# ESP32 / Xtensa side: firmware build + qemu-system-xtensa.
+#
+# Kept separate from the analysis image on purpose. The ESP-IDF toolchain is
+# roughly 2 GB; you rebuild the analysis image many times a day and this one
+# almost never.
+#
+# UNVERIFIED. No Docker daemon and no access to espressif.com were available
+# where this scaffold was produced. Treat the QEMU install step as the likely
+# breakage point: recent ESP-IDF images may already ship qemu-xtensa, in which
+# case the idf_tools.py line is a no-op, and older ones name the tool
+# differently. Check `idf.py qemu --help` before debugging anything else.
+
+ARG IDF_VERSION=v5.3
+FROM espressif/idf:${IDF_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# QEMU with the esp32 machine model (eFuses, secure boot v2, flash encryption).
+RUN . ${IDF_PATH}/export.sh \
+    && python ${IDF_PATH}/tools/idf_tools.py install qemu-xtensa \
+    || echo "qemu-xtensa install failed or already present -- verify with 'idf.py qemu --help'"
+
+# gdb-multiarch is a useful fallback if the IDF-provided xtensa gdb misbehaves
+# when scripting the interleaving driver (README step 13).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gdb-multiarch socat \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work/firmware
+
+# The IDF image's own entrypoint sources export.sh; keep it.
+CMD ["bash", "-lc", "idf.py --version && echo 'ready: idf.py set-target esp32 && idf.py build && idf.py qemu'"]
