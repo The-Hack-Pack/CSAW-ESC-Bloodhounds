@@ -1,0 +1,31 @@
+# Generated per-user: carries the invoking user's ids into the image build.
+# A committed copy from another machine makes container writes unwritable.
+docker/.env
+
+# Build products of the host twin -- MUST NOT be committed. Host- and
+# container-built binaries link different sanitizer runtimes (libasan.so.6 vs
+# .so.8); a shipped binary is newer than the sources, so make skips the
+# rebuild and every track dies at the loader.
+host_twin/target_tsan
+host_twin/target_asan
+host_twin/target_plain
+host_twin/fuzz_stdin
+host_twin/fuzz_libfuzzer
+host_twin/fuzz_afl
+
+# ESP-IDF build tree (the analysis image also keeps it in a named volume).
+firmware/build/
+firmware/sdkconfig.old
+
+# kernel.core_pattern=core makes ASan aborts dump cores into the repo.
+core.*
+crash-*
+
+# scripts/blind.py stash -- if this exists, a run was interrupted mid-blind.
+.blind_stash/
+
+__pycache__/
+*.pyc
+
+# Pristine copy of the generated scaffold, superseded by commit 1.
+files.zip

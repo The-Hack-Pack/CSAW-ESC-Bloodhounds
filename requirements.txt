@@ -9,4 +9,7 @@ capstone==5.0.9
 z3-solver==4.13.0.0
 
 # Agent layer
-anthropic>=0.40,<1.0
+# 1.x is required, not cosmetic: adaptive thinking, output_config.effort and
+# the server-side fallbacks parameter in run_agent.py do not exist in 0.x.
+# 1.x also moves to httpx2 and needs Python >= 3.10 (container has 3.12).
+anthropic>=1.0,<2.0

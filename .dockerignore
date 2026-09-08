@@ -12,3 +12,8 @@ host_twin/crash-*
 firmware/build
 firmware/sdkconfig.old
 agent/findings.json
+
+# kernel.core_pattern=core makes ASan aborts dump cores into the bind mount.
+core.*
+crash-*
+.blind_stash/

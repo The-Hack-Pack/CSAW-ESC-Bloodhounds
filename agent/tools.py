@@ -67,6 +67,24 @@ def run_interleaving(iters: int = 20, widen: int = 1) -> dict:
     return _run([os.path.join(TWIN, "target_asan"), "race", str(iters), str(widen)])
 
 
+def run_cred_race(iters: int = 20, widen: int = 1) -> dict:
+    """Drive the credential store with a concurrent second I2C writer and count
+    how often check_credential grants admin for a record whose stored role is
+    NOT admin. Returns the sequential control alongside it: the control must be
+    0, so the pair isolates concurrency as the cause rather than a bad record.
+    Evidence, not a verdict -- a nonzero count with a zero control is a
+    privilege escalation, and the exit code is 1 when it happens."""
+    base = _run([os.path.join(TWIN, "target_asan"), "cred-baseline", "500"])
+    race = _run([os.path.join(TWIN, "target_asan"), "cred", str(iters), str(widen)])
+    return {
+        "sequential_control": base["stdout"].strip(),
+        "control_rc": base["rc"],
+        "concurrent": race["stdout"].strip(),
+        "concurrent_rc": race["rc"],
+        "escalated": race["rc"] == 1 and base["rc"] == 0,
+    }
+
+
 def validate_poc(poc_hex: str) -> dict:
     """THE GATE. Feed a candidate input to the ASan harness. A finding without
     crashed=True is a hypothesis, not a vulnerability."""
@@ -107,6 +125,9 @@ SCHEMAS = [
          "iters": {"type": "integer"}, "widen": {"type": "integer"}}}},
     {"name": "symbolic_solve", "description": "Use angr to solve for an input that reaches the parse_config memcpy with an oversized length.",
      "input_schema": {"type": "object", "properties": {"input_len": {"type": "integer"}}}},
+    {"name": "run_cred_race", "description": "Drive the I2C credential store with a concurrent writer and report whether check_credential grants admin for a non-admin record, against a sequential control.",
+     "input_schema": {"type": "object", "properties": {
+         "iters": {"type": "integer"}, "widen": {"type": "integer"}}}},
     {"name": "validate_poc", "description": "Required before reporting any finding. Runs a hex-encoded input against the ASan harness and reports whether it actually crashed.",
      "input_schema": {"type": "object", "properties": {"poc_hex": {"type": "string"}},
                       "required": ["poc_hex"]}},
@@ -119,6 +140,7 @@ DISPATCH = {
     "run_tsan": run_tsan,
     "run_interleaving": run_interleaving,
     "symbolic_solve": symbolic_solve,
+    "run_cred_race": run_cred_race,
     "validate_poc": validate_poc,
 }
 

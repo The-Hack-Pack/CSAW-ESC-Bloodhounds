@@ -46,8 +46,18 @@ services:
   agent:
     extends:
       service: analysis
+    # The SDK reads an `ant auth login` OAuth profile from ~/.config/anthropic
+    # when ANTHROPIC_API_KEY is unset. Without this mount that path cannot work
+    # in the container, and the only option left is an API key. Read-only, and
+    # harmless when the directory does not exist.
+    volumes:
+      - ..:/work
+      - ${HOME}/.config/anthropic:/home/esc/.config/anthropic:ro
     environment:
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}"
+      # Do NOT use ${VAR:?...} here. Compose interpolates the whole file on
+      # every command, so a missing key would also break `build`, `run
+      # analysis` and `verify`. run_agent.py checks the key at startup.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OMP_NUM_THREADS: "1"
     working_dir: /work/agent
     command: ["python3", "run_agent.py", "--budget", "25"]
@@ -72,9 +82,11 @@ services:
     # group_add:
     #   - dialout
 
-    # gdbstub for the interleaving driver (README step 13).
+    # gdbstub for the interleaving driver (README step 13). ESP-IDF v5.3
+    # launches qemu with `-gdb tcp::3333`, NOT the 1234 you might expect from
+    # qemu's own default -- verified from the idf.py qemu command line.
     ports:
-      - "1234:1234"
+      - "3333:3333"
     stdin_open: true
     tty: true
 

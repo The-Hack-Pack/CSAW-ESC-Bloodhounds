@@ -122,12 +122,21 @@ Or AFL++ (`apt install afl++`, then `make -C host_twin fuzz_afl`). Record
 time-to-first-crash for BUG-002 — that's your baseline number for showing what
 the LLM adds.
 
-**10. Add a decompiler track.** Install Ghidra 11.x, then
+**10. Add a decompiler track.** Install Ghidra 11.3 or newer, then
 `analyzeHeadless <proj> esc26 -import host_twin/target_plain -postScript ...`.
-For the Xtensa firmware you'll need a processor module — check whether your
-Ghidra version ships Xtensa before relying on it, and fall back to
-`yetmorecode/ghidra-xtensa` or the esp32 community modules if not. **Verify
-this in week 1**; it's the largest single unknown in the plan.
+Xtensa is **shipped in the box** from 11.3 onward, so no
+`yetmorecode/ghidra-xtensa` module and no community esp32 module is required.
+Verified end to end against the real firmware — `agent/ghidra/CountFuncs.java`
+is a working post-script that prints the detected language and resolves the
+planted-bug symbols:
+```bash
+analyzeHeadless /tmp/proj esc26 -import firmware/build/esc26_testbed.elf \
+  -scriptPath agent/ghidra -postScript CountFuncs.java
+# Using Language/Compiler: Xtensa:LE:32:default:default
+# FUNCTIONS_FOUND=956   SYM handle_frame=400d60c0
+```
+Note the ELF lives in the `esp32-build` volume, not the bind mount. This used
+to be flagged as the plan's largest unknown; it is settled.
 
 ---
 
@@ -148,16 +157,25 @@ expect to fix includes.
 
 **12. Attach a debugger.**
 ```bash
-idf.py qemu gdb
+idf.py qemu --gdb                                    # waits on :3333
+xtensa-esp32-elf-gdb build/esc26_testbed.elf         # not xtensa-esp-elf-gdb
 ```
 This is what makes step 13 possible: breakpoints are your interleaving
-control on a target where you can't use TSan.
+control on a target where you can't use TSan. Two things the docs get wrong
+for IDF v5.3: the stub listens on **3333**, not qemu's usual 1234, and the
+unversioned `xtensa-esp-elf-gdb` does not exist — the binary is
+`xtensa-esp32-elf-gdb`.
 
-**13. Build the interleaving driver.** Set a breakpoint at the CHECK in
-`handle_frame`, and on hit, script GDB to invoke `rfid_isr_handler` with an
-oversized length before continuing. That's a deterministic race trigger with
-no source instrumentation — the technique to write up, since it transfers
-directly to the real challenge firmware where you can't add `usleep` calls.
+**13. Build the interleaving driver.** Done — `firmware/interleave.gdb`:
+```bash
+xtensa-esp32-elf-gdb -batch -x interleave.gdb build/esc26_testbed.elf
+```
+It primes `g_len` with a legal 8-byte frame so the consumer passes its own
+CHECK, breaks between the CHECK and the USE, fires `rfid_isr_handler(64)`
+inside that window, and dumps the stack either side of the `memcpy`. The
+0x41 run past offset 16 is the overflow. Deterministic, and no source
+instrumentation — which is why it transfers to the real challenge firmware
+where you can't add `usleep` calls.
 
 **14. Confirm on hardware once you have the kit.** Flash the same firmware,
 drive the MFRC522 IRQ line, and check the crash reproduces. For anything you
@@ -214,18 +232,101 @@ voting across models. Each of these should be justified by a number from step
 
 ## What was verified vs. not
 
-Verified by execution: the host twin builds and the TSan race, both ASan
-overflows, and the angr directed solve all reproduce; the angr solution
-validates as a real crash through the PoC gate; the tool layer returns
-`crashed=true` for the crashing input and `false` for a benign one; the
-libFuzzer and AFL++ targets both build, and libFuzzer finds BUG-002 in ~5,400
-executions; every apt package and pinned Python version in `docker/Dockerfile`
-resolves on Ubuntu 24.04; `docker/entrypoint.sh` passes its own preflight; the
-compose file and root Makefile parse.
+*Updated 2026-09-08, after the environment was built and exercised on
+Ubuntu 22.04 / Docker 29.8 / 20 cores. Seven defects found and fixed; see
+the per-file notes in `docker/` for the reasoning behind each.*
 
-Not verified: no Docker daemon was available, so the images were never
-actually built — the Dockerfile layers were validated by replaying them
-directly on an Ubuntu 24.04 host, which catches package-name and version
-errors but not layer-ordering or COPY-path errors. Also unverified: the
-ESP-IDF firmware (never compiled), all of Phase C, `docker/Dockerfile.esp32`,
-Ghidra Xtensa support, and `run_agent.py` (no API key).
+Verified by execution, in the container: both images build; all four tracks of
+`scripts/run_all.sh` fire (TSan race on `g_len`, ASan overflow in
+`handle_frame`, ASan overflow in `parse_config`, angr recovering the `0xC0`
+magic and solving the length field); the PoC gate returns `crashed=true` for a
+crashing input and `false` for a benign one; libFuzzer finds BUG-002 in ~19k
+executions and AFL++ in ~20k, and both crash artifacts replay through
+`validate_poc` and attribute to `parse_config:70`; `run_agent.py` exits
+cleanly when `ANTHROPIC_API_KEY` is unset, and the SDK accepts every parameter
+it sends.
+
+Verified for Phase C: `docker/Dockerfile.esp32` builds (7.5 GB); the firmware
+compiles clean on the first attempt — no include fixes were needed, contrary
+to the warning this file used to carry; it boots under QEMU as a multicore app
+and logs `esc26 testbed up`; and `firmware/interleave.gdb` reproduces BUG-001
+on Xtensa through the gdbstub with **no source instrumentation** — 0x41 fills
+32 bytes of a 16-byte buffer — which is the step-13 technique working as
+designed.
+
+Ghidra ships an Xtensa processor module natively as of 11.3, so the
+`yetmorecode/ghidra-xtensa` fallback is not needed. Confirmed by running it,
+not just by checking the module list: Ghidra 12.1.3 auto-detects the firmware
+ELF as `Xtensa:LE:32:default`, analysis succeeds, and it recovers 956
+functions with `handle_frame` at `400d60c0` and `rfid_isr_handler` at
+`40082a10` — byte-identical to `xtensa-esp-elf-nm`. `agent/ghidra/CountFuncs.java`
+is the post-script used. This was the plan's largest single unknown and it
+resolves favorably.
+
+**The agent layer was measured end to end (2026-09-08), substituting Claude
+Code subagents for `run_agent.py` because a Claude.ai subscription does not
+carry API access.** Two blinded runs, using `scripts/blind.py` to strip every
+comment and stash this file plus the answer key. Run 1 scored 4/6 weighted --
+the ceiling at the time, because BUG-003 was unprovable (below). Run 2, after
+BUG-003 was given a concurrent writer, scored **6/6 weighted, 0 false
+positives, 9 tool calls against a 25 budget**, with all three planted bugs
+carrying validated proofs and all three decoys correctly rejected. Score any
+run with `python3 scripts/score.py agent/findings.json`.
+
+**BUG-003 was unreachable by every dynamic technique until 2026-09-08.**
+Nothing in the harness or the firmware wrote `g_eeprom` while
+`check_credential` sat between its check and its use, so `reachable_by:
+["tsan", "interleaving_fuzz"]` in the answer key was aspirational, and the
+answer key carried no `poc` for it at all. Worse, its impact is privilege
+escalation rather than a crash, so `validate_poc` -- which only recognises a
+sanitizer abort -- could never prove it. Any agent obeying the
+no-unvalidated-findings rule was capped at 4/6. `run_cred_race()` now supplies
+the concurrent writer, and the oracle is a **pair**: a sequential control that
+must return 0 escalations in 500 checks, against a concurrent run that grants
+admin for a record whose stored role is `0x00`. The concurrent count alone
+proves nothing; it is the pair that isolates concurrency as the cause. Still
+open: `validate_poc` has no oracle mode, so the toolkit now has two classes of
+proof and only one gate enforces either.
+
+**`g_widen_window` is not required for BUG-001.** `./host_twin/target_asan
+race 3000000 0` crashes in `handle_frame` with the hook off -- verified 3/3.
+The window is real, just narrow; the hook buys speed and determinism, not
+reachability. Step 6 below overstates its role.
+
+**`vm.mmap_rnd_bits=28` is required, not optional.** Without it TSan fails to
+map shadow memory in roughly 2 runs out of 3 — measured at 28/30 for
+`target_tsan` on a stock 6.8 kernel. It is intermittent, so a couple of clean
+runs prove nothing; the whole four-track sweep can look healthy on one
+invocation and report "no race" on the next. Run `sudo bash
+docker/host-setup.sh` (or just `sudo sysctl -w vm.mmap_rnd_bits=28`) before
+trusting the TSan track. The preflight now tests this by actually running TSan
+six times and refuses to start otherwise; `ESC26_SKIP_TSAN_CHECK=1` downgrades
+it to a warning if you only need the ASan/angr/fuzzing tracks.
+
+Four corrections worth carrying forward:
+
+- **The gdbstub is on :3333, not :1234.** ESP-IDF v5.3 launches qemu with
+  `-gdb tcp::3333`. The compose port publish and the Makefile help text both
+  said 1234 and were wrong.
+- **Never build the host twin on the host.** Host and container write the same
+  bind-mounted `host_twin/`, but link different sanitizer runtimes
+  (`libasan.so.6` vs `.so.8`). Whichever built last wins and `make` then skips
+  the rebuild. `scripts/run_all.sh` now fails loudly on this instead of
+  reporting "no crash".
+- **`kernel.core_pattern=core` litters the repo.** Once that sysctl is set,
+  every ASan abort dumps a core into the bind-mounted working directory --
+  728 KB of `core.*` and `crash-*` accumulated across one session. Both are
+  now in `.dockerignore`.
+- **Never test a sanitizer through a pipe.** `prog 2>&1 | grep -q ...` under
+  `set -o pipefail` reports the *sanitizer's* nonzero exit, not grep's match,
+  so a detected failure reads as "no failure". This bit both
+  `scripts/run_all.sh` and `docker/entrypoint.sh`; both now capture output to
+  a variable and match with `case`.
+- **`parse_config` is eliminated from the firmware build.** It is called under
+  `if (n)` with `n` hard-coded to 0, so dead-code removal drops it. Anything
+  reasoning about the ELF (Ghidra, symbol-based tooling) will not find it —
+  give `net_task` a real input path before relying on that.
+
+Still not verified: hardware (step 14, needs the kit), and `run_agent.py`'s
+actual agent loop and scoring, which need an `ANTHROPIC_API_KEY`. Everything
+else in Phases 0, A, B, and C now runs.

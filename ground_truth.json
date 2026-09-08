@@ -6,24 +6,47 @@
       "id": "BUG-001",
       "class": "atomicity violation / TOCTOU on shared state",
       "cwe": "CWE-367, CWE-787",
-      "site": {"file": "host_twin/target.c", "function": "handle_frame", "line_hint": 54},
-      "racing_with": {"function": "rfid_isr", "context": "interrupt / other core"},
+      "site": {
+        "file": "host_twin/target.c",
+        "function": "handle_frame",
+        "line_hint": 54
+      },
+      "racing_with": {
+        "function": "rfid_isr",
+        "context": "interrupt / other core"
+      },
       "shared_object": "g_len",
       "description": "handle_frame validates g_len into n, then passes g_len (not n) to memcpy. The RFID ISR can grow g_len inside the window.",
       "impact": "stack buffer overflow, 64 bytes into a 16-byte buffer",
-      "reachable_by": ["tsan", "interleaving_fuzz", "static_lockset"],
-      "not_reachable_by": ["sequential_fuzz"],
+      "reachable_by": [
+        "tsan",
+        "interleaving_fuzz",
+        "static_lockset"
+      ],
+      "not_reachable_by": [
+        "sequential_fuzz"
+      ],
       "poc": "./host_twin/target_asan race 20 1",
-      "difficulty": "hard"
+      "difficulty": "hard",
+      "note": "g_widen_window is NOT required. Verified 3/3 on 2026-09-08: ./host_twin/target_asan race 3000000 0 crashes in handle_frame with the hook off, so the window is real, just narrow. The hook buys speed and determinism, not reachability -- do not describe the bug as depending on it.",
+      "poc_unwidened": "./host_twin/target_asan race 3000000 0"
     },
     {
       "id": "BUG-002",
       "class": "trusted length field",
       "cwe": "CWE-787, CWE-1284",
-      "site": {"file": "host_twin/target.c", "function": "parse_config", "line_hint": 70},
+      "site": {
+        "file": "host_twin/target.c",
+        "function": "parse_config",
+        "line_hint": 70
+      },
       "description": "The 16-bit big-endian length field is bounds-checked against the SOURCE length only, never against the 32-byte destination.",
       "impact": "stack buffer overflow",
-      "reachable_by": ["sequential_fuzz", "symbolic_execution", "llm_code_review"],
+      "reachable_by": [
+        "sequential_fuzz",
+        "symbolic_execution",
+        "llm_code_review"
+      ],
       "guard": "requires magic byte 0xC0 - a fuzzer needs ~2^8 tries or one solver call",
       "poc": "printf '\\x00\\xc0\\x00\\x3d' | cat - /dev/zero | head -c 65 | ./host_twin/fuzz_stdin",
       "difficulty": "easy"
@@ -32,12 +55,28 @@
       "id": "BUG-003",
       "class": "TOCTOU against external storage",
       "cwe": "CWE-367",
-      "site": {"file": "host_twin/target.c", "function": "check_credential", "line_hint": 90},
+      "site": {
+        "file": "host_twin/target.c",
+        "function": "check_credential",
+        "line_hint": 90
+      },
       "shared_object": "g_eeprom",
       "description": "The credential record is validated, then the role byte is re-read from the EEPROM. A concurrent writer (or a physically re-flashed I2C part) can change the role between check and use.",
       "impact": "privilege escalation to admin",
-      "reachable_by": ["tsan", "interleaving_fuzz", "llm_code_review"],
-      "difficulty": "medium"
+      "reachable_by": [
+        "escalation_oracle",
+        "tsan",
+        "interleaving_fuzz",
+        "llm_code_review"
+      ],
+      "difficulty": "medium",
+      "poc": "./host_twin/target_asan cred 20 1   # exits 1, escalations > 0; control: ./host_twin/target_asan cred-baseline 500 exits 0 with 0",
+      "racing_with": {
+        "function": "eeprom_write",
+        "context": "second I2C master / re-flashed EEPROM part",
+        "driver": "run_cred_race in host_twin/target.c"
+      },
+      "note": "Before 2026-09-08 no harness path wrote g_eeprom concurrently, so this bug was unreachable by every dynamic technique and unprovable through the PoC gate -- findable only by code review. run_cred_race supplies the concurrent writer; the oracle is privilege escalation, not a crash, so validate_poc still cannot prove it. Use run_cred_race or TSan."
     }
   ],
   "decoys": [

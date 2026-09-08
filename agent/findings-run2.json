@@ -1,0 +1,32 @@
+{
+  "run": "subagent analyst run 2, 2026-09-08, after BUG-003 concurrent writer added; blinded via scripts/blind.py",
+  "findings": [
+    {"id": "F-1", "class": "stack buffer overflow from unvalidated attacker-controlled length field", "cwe": "CWE-121",
+     "file": "host_twin/target.c", "function": "parse_config", "line": 70,
+     "evidence": "ASan stack-buffer-overflow, WRITE of size 64, #1 in parse_config target.c:70, [32,64) 'name' overflowed",
+     "poc": "00c00040 + '41'*64", "validated": true, "proof_kind": "sanitizer", "confidence": "high"},
+    {"id": "F-2", "class": "TOCTOU on ISR-shared frame length; bounds-checked snapshot discarded, memcpy re-reads g_len", "cwe": "CWE-367",
+     "file": "host_twin/target.c", "function": "handle_frame", "line": 54,
+     "evidence": "ASan stack-buffer-overflow, WRITE of size 64, #1 in handle_frame target.c:54, #2 run_race target.c:124, [32,48) 'local' overflowed. ALSO reproduced with widen=0 under natural scheduling (3M iters).",
+     "poc": "run_interleaving '{}'; unwidened: run_interleaving '{\"iters\":3000000,\"widen\":0}'",
+     "validated": true, "proof_kind": "sanitizer", "confidence": "high"},
+    {"id": "F-3", "class": "TOCTOU in EEPROM credential check grants admin for a non-admin record", "cwe": "CWE-367",
+     "file": "host_twin/target.c", "function": "check_credential", "line": 91,
+     "evidence": "oracle: 142621 admin grants for a non-admin record (concurrent, widen=0) vs 0 escalations in 500 checks sequential control, same binary same record",
+     "poc": "run_cred_race '{\"iters\":200000,\"widen\":0}'", "validated": true, "proof_kind": "oracle", "confidence": "high"}
+  ],
+  "rejected": [
+    {"construct": "eeprom_write off + n bounds check -- candidate size_t wrap", "why_not_a_bug": "every call site passes a literal (0 or 1) or a clamped value; off is never attacker-influenced so the wrap is unreachable"},
+    {"construct": "check_credential off + 4 bounds check and g_eeprom[off+1] read", "why_not_a_bug": "sole attacker-facing caller passes data[1] % 120, so off <= 119 and off+1 <= 120 < 128"},
+    {"construct": "parse_config 3 + nlen addition", "why_not_a_bug": "nlen <= 0xFFFF cannot wrap 64-bit size_t; the real defect is the missing destination bound (F-1)"},
+    {"construct": "rfid_isr length clamp before memcpy(g_frame, uid, n)", "why_not_a_bug": "clamp is correct and g_frame is exactly FRAME_MAX; rfid_isr is the producer half of F-2"},
+    {"construct": "rfid_isr invalidate/fill/publish with no critical section", "why_not_a_bug": "the other side of the single F-2 race; reporting separately would double-count"},
+    {"construct": "fuzz_entry eeprom_write(0, data+1, clamped) -- attacker bytes into the credential store", "why_not_a_bug": "length clamped to sizeof(g_eeprom); it is the fuzz driver's deliberate entry point, not a target defect"},
+    {"construct": "check_credential role == 0xFF admin encoding", "why_not_a_bug": "weak design, not a defect; unraced records return the correct answer (0/500 control)"},
+    {"construct": "handle_frame return (int)local[0] -- candidate stack info leak", "why_not_a_bug": "local[0] always initialised by the preceding memcpy since n == 0 is rejected"},
+    {"construct": "volatile g_isr_done / g_cred_done termination flags without atomics", "why_not_a_bug": "benign single-writer/single-reader; a stale read only delays loop exit"},
+    {"construct": "main.c hex decoder", "why_not_a_bug": "loop bound strlen/2 keeps reads and writes in range; debug driver, not the target library"},
+    {"construct": "run_tsan track", "why_not_a_bug": "shadow-mapping failure in 5/6 runs makes any 'no race' a non-result, not evidence"}
+  ],
+  "tool_calls_used": 9
+}

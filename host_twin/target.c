@@ -125,3 +125,70 @@ int run_race(int iters, int widen)
     pthread_join(t, NULL);
     return 0;
 }
+
+/* ---- BUG-003 driver --------------------------------------------------------
+ * Without a concurrent writer, BUG-003 is unreachable by every dynamic
+ * technique: run_race only drives rfid_isr, so nothing ever writes g_eeprom
+ * while check_credential is between its CHECK and its USE. That made the bug
+ * findable only by code review, and unprovable through the PoC gate.
+ *
+ * This models the second I2C master (or a physically re-flashed EEPROM part)
+ * rewriting the role byte of an already-validated record. The oracle is
+ * privilege escalation rather than a crash: the planted record is a VALID
+ * non-admin credential, so a sequential run can only ever return 0. Any
+ * observed 1 is admin access derived from a record that was not admin, caused
+ * purely by the check and the use not being atomic. */
+struct cred_args { int iters; };
+static volatile int g_cred_done = 0;
+
+static void *cred_writer_thread(void *arg)
+{
+    struct cred_args *a = arg;
+    uint8_t admin = 0xFF, user = 0x00;
+
+    for (int i = 0; i < a->iters; i++) {
+        if (g_widen_window) usleep(150);   /* let the consumer clear its tag check */
+        eeprom_write(1, &admin, 1);        /* role := admin, inside the window */
+        if (g_widen_window) usleep(150);
+        eeprom_write(1, &user, 1);         /* and back, so the record reads benign */
+    }
+    g_cred_done = 1;
+    return NULL;
+}
+
+/* Sequential control. Plants the same non-admin record and hammers
+ * check_credential with NO writer running, so it must return 0. Without this
+ * the escalation count from run_cred_race proves nothing -- it is the pair
+ * (0 sequential, >0 concurrent) that isolates concurrency as the cause. */
+int run_cred_baseline(int checks)
+{
+    uint8_t rec[4] = { 0x5A, 0x00, 0, 0 };
+    int escalations = 0;
+
+    eeprom_write(0, rec, sizeof(rec));
+    for (int i = 0; i < checks; i++) {
+        if (check_credential(0) == 1) escalations++;
+    }
+    return escalations;
+}
+
+/* Returns the number of times check_credential granted admin for a record
+ * whose stored role is 0x00, or -1 if the thread could not start. */
+int run_cred_race(int iters, int widen)
+{
+    pthread_t t;
+    struct cred_args a = { .iters = iters };
+    uint8_t rec[4] = { 0x5A, 0x00, 0, 0 };   /* valid record, deliberately NOT admin */
+    int escalations = 0;
+
+    g_widen_window = widen;
+    eeprom_write(0, rec, sizeof(rec));
+
+    g_cred_done = 0;
+    if (pthread_create(&t, NULL, cred_writer_thread, &a) != 0) return -1;
+    while (!g_cred_done) {
+        if (check_credential(0) == 1) escalations++;
+    }
+    pthread_join(t, NULL);
+    return escalations;
+}
