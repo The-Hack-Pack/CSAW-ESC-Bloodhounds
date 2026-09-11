@@ -29,3 +29,9 @@ __pycache__/
 
 # Pristine copy of the generated scaffold, superseded by commit 1.
 files.zip
+
+# Whole-binary CFG facts: regenerable in ~130s, ~10 MB per target, keyed by
+# binary SHA-256. The artifacts themselves (chunks/constraints/findings) are
+# the record of a run and ARE worth committing.
+agent/artifacts/cache/
+agent/artifacts/pipeline_run.json

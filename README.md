@@ -69,14 +69,16 @@ cd esc26-testbed/host_twin && make
 ```
 Produces `target_tsan`, `target_asan`, `target_plain`, `fuzz_stdin`.
 
-**3. Confirm all four detection tracks fire.**
+**3. Confirm all six detection tracks fire.**
 ```bash
 ./scripts/run_all.sh
 ```
 You should see: a TSan data race on `g_len`, an ASan stack-buffer-overflow in
-`handle_frame`, an overflow in `parse_config`, and angr solving for an
-oversized length field. If any track is silent, fix that before adding an
-agent — you'd be measuring your harness, not your agent.
+`handle_frame`, an overflow in `parse_config`, angr solving symbolically for an
+oversized length field, angr *concolically* recovering the magic byte from a
+garbage seed and producing a replayed crash, and the credential-store
+escalation against a clean sequential control. If any track is silent, fix that
+before adding an agent — you'd be measuring your harness, not your agent.
 
 **4. Read the answer key, then set it aside.**
 `ground_truth.json` lists three planted bugs and three decoys. The agent must
@@ -98,20 +100,45 @@ scheduler that fires the ISR at chosen program points — the Razzer approach.
 
 ## Phase B — analysis tooling
 
-**7. Install angr.**
+**7. Symbolic execution over a chunk.**
 ```bash
-pip install --break-system-packages angr
-python3 agent/solve_parse_config.py host_twin/target_plain 64
+make facts                      # whole-binary CFG, ~130s, cached by SHA-256
+make symbolic
 ```
-Expect it to recover the `0xC0` magic byte on its own and then, once you
-constrain the length field above the 32-byte destination, hand you a crashing
-input. Worth noting for the report: with an 8-byte input angr correctly proves
-the bug *unreachable* — the source-length check ties `nlen` to input size. That
-kind of negative result is something fuzzing can't give you.
+`agent/lib/symex.py` takes a *chunk spec* — an entry, an argument layout, and
+sinks — and explores to the sinks. Nothing is hardcoded to `parse_config`: the
+destination and length are read from the argument registers **at the call
+site**, and the destination's capacity comes from the DWARF extent of the stack
+local it resolves to (`dwarf_local:name:uint8_t[][32]`), not from a guess.
 
-**8. Close the loop.** Feed angr's solution back through `validate_poc`. Every
-symbolic result must become a concrete, replayable crash. This is the PoC gate
-and it's the single most important property of the system.
+Expect `dest_capacity=32`, `length_max=61`, `overflow=true`, and a solved input
+beginning `c0003d`. Worth noting for the report: with an 8-byte buffer it
+returns `proved_unreachable` instead — the source-length check ties `nlen` to
+input size, so `nlen > 32` is UNSAT. That negative is a *proof*, and it is
+something fuzzing cannot give you.
+
+The capacity derivation is the part to get right. Using the distance from the
+buffer to the frame's CFA — the obvious fallback — reports 64 bytes for
+`parse_config`, which makes every overflow of 33..61 bytes look in-bounds and
+hides the planted bug completely. `agent/lib/dwarfinfo.py` exists because cle
+drops the array subrange count that makes 32 the right answer.
+
+**8. Concolic execution from a seed.**
+```bash
+make concolic
+```
+`agent/lib/concolic.py` is the other half, and it is a genuinely different
+technique — see *Symbolic vs concolic* below. Seeded with 64 bytes of `0x41`
+and no hints, generation 0 recovers the `0xC0` magic by negating a branch,
+generation 1 reaches the `memcpy`, and the inputs it generates are replayed
+through the ASan harness automatically. Expect confirmed crashes at `nlen=36`
+and `nlen=61`, each carrying the sanitizer report that names
+`parse_config target.c:70` and `[32, 64) 'name'`.
+
+**8b. The gate.** Every symbolic or concolic result must become a concrete,
+replayable crash through `validate_poc`. This is the single most important
+property of the system, and it is why the concolic stage replays inline and the
+proof stage replays again independently.
 
 **9. Add a real fuzzer.**
 ```bash
@@ -188,21 +215,27 @@ QEMU and forward peripheral accesses to the board — the Avatar² pattern.
 
 **15. Wire up the toolkit.**
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY=...
-python3 agent/tools.py     # smoke test: should print a TSan race report
+python3 agent/toolcli.py                      # every tool
+python3 agent/toolcli.py --stage chunk        # one stage's tools
+python3 agent/toolcli.py function_info '{"name": "parse_config"}'
 ```
-`agent/tools.py` is the contract. Note the design rule: **tools return
-evidence, never verdicts.** `validate_poc` is the only thing that can promote
-a hypothesis to a finding.
+`agent/tools.py` is the contract, and `toolcli.py` and `pipeline.py` both
+dispatch through `tools.call()` — there is no second code path. The design rule
+is unchanged: **tools return evidence, never verdicts.** `validate_poc` is the
+only thing that can promote a hypothesis to a finding.
 
-**16. Run the loop.**
+**16. Run the pipeline.**
 ```bash
-cd agent && python3 run_agent.py --budget 25
+make pipeline                    # all five stages
+make stage STAGE=constrain       # just one
+make brief STAGE=concolic        # the brief, for driving a stage by hand
 ```
-~100 lines of ReAct. Resist the urge to make it clever before it's reliable.
+Five stages, each a fresh conversation with a narrow tool set, artifacts on
+disk as the only channel between them — see *The pipeline* below. Resist the
+urge to make it clever before it is reliable.
 
-**17. Score it.** Compare `findings.json` against `ground_truth.json`:
+**17. Score it.** Compare `agent/artifacts/findings.json` against
+`ground_truth.json`:
 - bugs found / 3, weighted by difficulty
 - false positives (did it report a decoy?)
 - turns and tokens per bug found
@@ -213,6 +246,112 @@ cd agent && python3 run_agent.py --budget 25
 delta. In AIxCC, parallel fuzzing alone solved 54% of the bugs — if you don't
 measure your own equivalent, a judge will reasonably ask whether the LLM did
 anything.
+
+---
+
+## The pipeline
+
+Five stages, each a fresh conversation with a narrow tool set. Artifacts on
+disk are the only channel between them, which is what makes any stage
+independently re-runnable — `--from analyze` does not care whether
+`constraints.json` came from stage 2, from a subagent, or from your text editor.
+
+| stage | agent | reads | writes | owns |
+|---|---|---|---|---|
+| 1 | **Chunker** | — | `chunks.json` | what to analyse, and why those functions belong together |
+| 2 | **Constraint** | `chunks.json` | `constraints.json` | symbolic execution to the sinks; SAT/UNSAT per sink |
+| 3 | **Analyzer** | 1, 2 | `candidates.json` | defect class, CWE, and what would prove it |
+| 4 | **Concolic** | 1, 3 | `concolic.json` | seed-driven dynamic testing; replayed crashes |
+| 5 | **Proof** | 3, 4, 2 | `findings.json` | what the pipeline is willing to claim |
+
+The tool sets are narrow on purpose. The chunker has no proof tools, so it
+cannot wander off validating things; the prover has no symbolic tools, so it
+cannot re-derive the claim it is supposed to be testing independently.
+
+**Two drivers, one contract.** `pipeline.py` runs the stages unattended against
+the Anthropic API inside the container. `pipeline.py --brief <stage>` prints a
+self-contained brief for driving the same stage as a Claude Code subagent,
+executing tools through `toolcli.py`. Both read `stages.py` and dispatch
+through `tools.call()`, so the two paths cannot drift.
+
+### Why chunking is not optional
+
+Whole-binary `CFGFast` on `host_twin/target_plain` takes **129 seconds and
+recovers 7219 functions**, twelve of which are yours. That cost is paid once:
+`agent/lib/binfacts.py` caches the facts by binary SHA-256, and every later
+query is a dict lookup. A scoped CFG over one chunk's address range costs
+milliseconds, and a chunk solves in **0.7 seconds**.
+
+Three things the chunker gets that are not available any other way:
+
+- **user code** — DWARF `functions_debug_info` separates your 12 functions from
+  libc's 7207. Without it every ranking is dominated by `__gconv_*` noise.
+- **shared globals** — xrefs by destination give reader/writer sets per global.
+  This is the edge the call graph does not have: `rfid_isr` *writes* `g_len`,
+  `handle_frame` *reads* it, and **no call edge connects them**. Grouping by
+  call structure alone would never put them in the same chunk, and that pair is
+  where the concurrency defect lives. Address-taken (`lea`) counts as a
+  potential write, which is what surfaces `g_frame` and `g_eeprom`.
+- **stack layout** — exact array extents, so a destination's capacity is a fact.
+
+On a static glibc build every libc call goes through an IRELATIVE PLT stub, so
+`memcpy` appears as `sub_401050`; `binfacts.py` follows the stub through its GOT
+slot to `__new_memcpy` and normalizes the glibc decoration away. Before that,
+`parse_config` reported **zero sinks**.
+
+### Symbolic vs concolic
+
+Both stages run angr; they are not the same technique, and the pipeline uses
+each for what it is good at.
+
+**Stage 2 (symbolic)** interprets over formulas. Inputs are symbols, every
+symbolic branch forks, and an SMT solver prunes infeasible paths. Scaling
+controls: a scoped CFG, `LoopSeer` bounded unrolling, `LengthLimiter`, an
+active-state cap, a wall-clock deadline, and `find=` the callee address so
+exploration stops **at** the sink and never inside it. It is the only stage that
+can prove a *negative* — `proved_unreachable` means UNSAT, no input in this
+domain reaches the bug.
+
+**Stage 4 (concolic)** runs a concrete seed, follows the one path it takes, and
+negates its branch conditions to generate new seeds. The symbolic buffer is
+preconstrained to the seed, so each step leaves the seed's successor in
+`successors` and every alternative in `unsat_successors`; dropping the
+preconstraints and solving an alternative yields a real, replayable input. One
+live state at a time, and every output is an actual execution rather than a
+model state that may not correspond to one.
+
+Observed on `parse_config`, from a seed of 64 `0x41` bytes with no hints:
+
+```
+gen 0  flip @0x401a95  ->  c0 00 00 ...      recovers the magic byte
+gen 1  flip @0x4155d0  ->  c0 0024 ...       CRASH: WRITE of size 36
+gen 3  flip @0x401aa7  ->  c0 003d ...       CRASH: WRITE of size 61
+                                             [32, 64) 'name' overflows
+```
+
+23 blocks, 15 inputs, 5 confirmed crashes, 7.7 seconds. Note where two of the
+flips land: *inside* `__memcpy_avx_unaligned_erms`, on its length dispatch.
+Concolic steps into the sink where symbolic deliberately stops at it, and here
+that is what produced the crash.
+
+### Finding a double-fetch symbolically
+
+`handle_frame` validates `g_len` into `n` and then passes `g_len` — not `n` — to
+`memcpy`. Model `g_len` as a single symbol and there is provably no bug: the
+CHECK and the USE read the same value, so `n == g_len`. The defect exists only
+because the RFID ISR can change it between the two reads.
+
+So a chunk may name `havoc_globals`, and every read of a havoc'd global returns
+an independent fresh symbol. On `handle_frame` that yields `havoc_reads: 2` —
+the two fetches — `dest_capacity: 16` (`local[16]`, from DWARF), an unbounded
+length, and a satisfiable overflow at 24 bytes. Without havoc the sink is not
+even reached, because `g_len` zero-fills and the `n == 0` guard returns early.
+
+This is the one place the pipeline can manufacture a bug that cannot happen, so
+it is fenced: havoc only applies to globals with a genuine concurrent writer,
+results carry `poc_kind: "interference"` to say **no byte string can prove
+this**, and stage 5 must produce a scheduling argument instead — a widened-window
+ASan crash plus an attempt to reproduce it with the window closed.
 
 ---
 
@@ -236,15 +375,27 @@ voting across models. Each of these should be justified by a number from step
 Ubuntu 22.04 / Docker 29.8 / 20 cores. Seven defects found and fixed; see
 the per-file notes in `docker/` for the reasoning behind each.*
 
-Verified by execution, in the container: both images build; all four tracks of
+Verified by execution, in the container: both images build; all six tracks of
 `scripts/run_all.sh` fire (TSan race on `g_len`, ASan overflow in
-`handle_frame`, ASan overflow in `parse_config`, angr recovering the `0xC0`
-magic and solving the length field); the PoC gate returns `crashed=true` for a
-crashing input and `false` for a benign one; libFuzzer finds BUG-002 in ~19k
-executions and AFL++ in ~20k, and both crash artifacts replay through
-`validate_poc` and attribute to `parse_config:70`; `run_agent.py` exits
-cleanly when `ANTHROPIC_API_KEY` is unset, and the SDK accepts every parameter
-it sends.
+`handle_frame`, ASan overflow in `parse_config`, symbolic execution deriving
+`dest_capacity=32` from DWARF and solving the length field, concolic execution
+recovering the `0xC0` magic from a garbage seed and producing replayed crashes
+at `nlen=36` and `nlen=61`, and the credential escalation against a clean
+sequential control); the PoC gate returns `crashed=true` for a crashing input
+and `false` for a benign one; libFuzzer finds BUG-002 in ~19k executions and
+AFL++ in ~20k, and both crash artifacts replay through `validate_poc` and
+attribute to `parse_config:70`.
+
+Verified for the pipeline (2026-09-11): whole-binary fact extraction (129s,
+7219 functions, 12 identified as user code via DWARF, IFUNC stubs resolved
+through the GOT); `symex_chunk` solving `parse_config` in 0.7s and returning
+`proved_unreachable` for an 8-byte buffer; `symex_chunk` with
+`havoc_globals:["g_len"]` reaching `handle_frame`'s memcpy with
+`havoc_reads: 2` and a satisfiable 24-byte overflow against a DWARF capacity of
+16; `concolic_chunk` producing 5 distinct ASan-confirmed crashes in 7.7s from a
+seed of 64 `0x41` bytes; all 18 tools dispatching through `tools.call()`; both
+drivers (`pipeline.py --list/--brief`, `toolcli.py --stage`) operating without
+credentials.
 
 Verified for Phase C: `docker/Dockerfile.esp32` builds (7.5 GB); the firmware
 compiles clean on the first attempt — no include fixes were needed, contrary
@@ -264,8 +415,10 @@ is the post-script used. This was the plan's largest single unknown and it
 resolves favorably.
 
 **The agent layer was measured end to end (2026-09-08), substituting Claude
-Code subagents for `run_agent.py` because a Claude.ai subscription does not
-carry API access.** Two blinded runs, using `scripts/blind.py` to strip every
+Code subagents for the API driver because a Claude.ai subscription does not
+carry API access.** Those runs predate the five-stage pipeline and used the
+single-loop agent; the scores below are the baseline the staged pipeline has to
+beat, not a measurement of it. Two blinded runs, using `scripts/blind.py` to strip every
 comment and stash this file plus the answer key. Run 1 scored 4/6 weighted --
 the ceiling at the time, because BUG-003 was unprovable (below). Run 2, after
 BUG-003 was given a concurrent writer, scored **6/6 weighted, 0 false
@@ -327,6 +480,10 @@ Four corrections worth carrying forward:
   reasoning about the ELF (Ghidra, symbol-based tooling) will not find it —
   give `net_task` a real input path before relying on that.
 
-Still not verified: hardware (step 14, needs the kit), and `run_agent.py`'s
-actual agent loop and scoring, which need an `ANTHROPIC_API_KEY`. Everything
-else in Phases 0, A, B, and C now runs.
+Still not verified: hardware (step 14, needs the kit), and the five stages'
+model loop end to end, which needs working credentials — `pipeline.py` reaches
+the API and fails cleanly on an expired OAuth refresh token, but no stage has
+yet completed a real conversation, so no `chunks.json` has been produced by an
+agent rather than by hand. Everything below the model loop — all 18 tools, both
+drivers, every artifact contract — runs. Everything in Phases 0, A, B, and C
+now runs.

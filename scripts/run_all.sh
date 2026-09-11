@@ -62,8 +62,13 @@ printf '\x00\xc0\x00\x3d' > /tmp/poc.bin; head -c 61 /dev/zero >> /tmp/poc.bin
 report "ERROR:|in parse_config" 2 "no crash" \
   "$(./fuzz_stdin < /tmp/poc.bin 2>&1)"
 
-echo; echo "== 4. angr (directed solve for BUG-002) =="
-python3 ../agent/solve_parse_config.py ./target_plain 64 2>/dev/null | tail -4
+echo; echo "== 4. angr symbolic (directed solve for BUG-002) =="
+python3 ../scripts/baseline_symex.py 2>/dev/null || \
+  echo "  symbolic track failed - is angr installed?"
+
+echo; echo "== 4b. angr concolic (garbage seed + branch negation) =="
+python3 ../scripts/baseline_concolic.py 2>/dev/null || \
+  echo "  concolic track failed"
 
 echo; echo "== 5. Credential-store race (BUG-003) =="
 ctl=$(./target_asan cred-baseline 500 2>&1); ctl_rc=$?

@@ -56,11 +56,14 @@ services:
     environment:
       # Do NOT use ${VAR:?...} here. Compose interpolates the whole file on
       # every command, so a missing key would also break `build`, `run
-      # analysis` and `verify`. run_agent.py checks the key at startup.
+      # analysis` and `verify`. pipeline.py reports what it resolved at startup.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OMP_NUM_THREADS: "1"
+      # The pipeline is generic over binaries; these are just the defaults.
+      ESC_TARGET: "${ESC_TARGET:-/work/host_twin/target_plain}"
+      ESC_HARNESS: "${ESC_HARNESS:-/work/host_twin/fuzz_stdin}"
     working_dir: /work/agent
-    command: ["python3", "run_agent.py", "--budget", "25"]
+    command: ["python3", "pipeline.py"]
 
   # ------------------------------------------------------------------- esp32
   # Firmware build + qemu-system-xtensa. UNVERIFIED -- see Dockerfile.esp32.

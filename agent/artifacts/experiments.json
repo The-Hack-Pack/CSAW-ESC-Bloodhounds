@@ -1,0 +1,179 @@
+{
+ "target": "/work/host_twin/target_plain",
+ "when": "2026-09-11T22:25:06",
+ "results": {
+  "scaling": {
+   "cfg_whole_binary_seconds": 129.9,
+   "cfg_functions": 7220,
+   "cfg_user_functions": 12,
+   "cases": [
+    {
+     "entry": "parse_config",
+     "label": "leaf: one function",
+     "members": 1,
+     "seconds": 0.7,
+     "sinks_reached": 1,
+     "sinks_not_reached": 0,
+     "stopped_early": null,
+     "stashes": {
+      "active": 2,
+      "found": 1
+     },
+     "overflow_found": true,
+     "error": null
+    },
+    {
+     "entry": "LLVMFuzzerTestOneInput",
+     "label": "harness entry: dispatch + 3 callees",
+     "members": 4,
+     "seconds": 0.8,
+     "sinks_reached": 2,
+     "sinks_not_reached": 0,
+     "stopped_early": null,
+     "stashes": {
+      "active": 2,
+      "found": 2
+     },
+     "overflow_found": false,
+     "error": null
+    },
+    {
+     "entry": "main",
+     "label": "whole program: fread + dispatch",
+     "members": 5,
+     "seconds": 0.6,
+     "sinks_reached": 1,
+     "sinks_not_reached": 1,
+     "stopped_early": null,
+     "stashes": {
+      "found": 1
+     },
+     "overflow_found": false,
+     "error": null
+    }
+   ]
+  },
+  "capacity": {
+   "dwarf": {
+    "capacity": 32,
+    "source": "dwarf_local:name:uint8_t[][32]",
+    "length_max": 61,
+    "overflow_found": true,
+    "solved_length": 47
+   },
+   "frame_distance": {
+    "capacity": 64,
+    "source": "chunk_spec",
+    "length_max": 61,
+    "overflow_found": false,
+    "proved_unreachable": "length > 64 is UNSAT along this path; the guards on the path bound it"
+   },
+   "conclusion": "frame-distance capacity yields a FALSE NEGATIVE: every write of 33..61 bytes overflows name[32] while staying inside the 64-byte frame"
+  },
+  "havoc": {
+   "without_havoc": {
+    "sinks_reached": 0,
+    "havoc_reads": 0,
+    "dest_capacity": null,
+    "capacity_source": null,
+    "length_unbounded": null,
+    "overflow_found": null,
+    "solved_length": null,
+    "poc_kind": null,
+    "seconds": 0.6
+   },
+   "with_havoc": {
+    "sinks_reached": 1,
+    "havoc_reads": 2,
+    "dest_capacity": 16,
+    "capacity_source": "dwarf_local:local:uint8_t[][16]",
+    "length_unbounded": true,
+    "overflow_found": true,
+    "solved_length": 24,
+    "poc_kind": "interference",
+    "seconds": 0.6
+   }
+  },
+  "generations": {
+   "seed": "0x41 * 64 (no magic, no hint)",
+   "curve": [
+    {
+     "generations": 1,
+     "blocks_covered": 6,
+     "inputs_generated": 3,
+     "crashing_inputs": 0,
+     "seconds": 0.5
+    },
+    {
+     "generations": 2,
+     "blocks_covered": 12,
+     "inputs_generated": 7,
+     "crashing_inputs": 1,
+     "seconds": 2.3
+    },
+    {
+     "generations": 3,
+     "blocks_covered": 19,
+     "inputs_generated": 11,
+     "crashing_inputs": 1,
+     "seconds": 5.2
+    },
+    {
+     "generations": 4,
+     "blocks_covered": 20,
+     "inputs_generated": 19,
+     "crashing_inputs": 7,
+     "seconds": 9.7
+    }
+   ]
+  },
+  "seeds": {
+   "garbage": {
+    "blocks_covered": 12,
+    "inputs_generated": 7,
+    "crashes": 1,
+    "seconds": 2.3
+   },
+   "magic_only": {
+    "blocks_covered": 19,
+    "inputs_generated": 12,
+    "crashes": 3,
+    "seconds": 5.0
+   },
+   "solver_hint": {
+    "blocks_covered": 19,
+    "inputs_generated": 12,
+    "crashes": 4,
+    "seconds": 5.1
+   }
+  },
+  "matrix": {
+   "BUG-002 parse_config overflow": {
+    "symbolic": true,
+    "concolic": true,
+    "asan_replay": true,
+    "tsan": false,
+    "oracle": false
+   },
+   "BUG-001 handle_frame TOCTOU": {
+    "symbolic_no_havoc": false,
+    "symbolic_havoc": true,
+    "concolic": "n/a: no input causes it (poc_kind=interference)",
+    "asan_interleaving": true,
+    "tsan": false,
+    "tsan_harness_broken": true
+   },
+   "BUG-003 check_credential escalation": {
+    "symbolic": "not attempted: no memory-safety sink",
+    "concolic": "n/a: authorization outcome, not a crash",
+    "asan": false,
+    "oracle": true,
+    "oracle_control_clean": true,
+    "oracle_numbers": {
+     "sequential": "sequential control: 0 escalation(s) in 500 checks (expect 0)",
+     "concurrent": "check_credential granted admin 18 time(s) for a non-admin record"
+    }
+   }
+  }
+ }
+}

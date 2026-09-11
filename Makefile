@@ -46,7 +46,7 @@ shell: docker/.env ## Interactive shell in the analysis container
 	$(RUN) bash
 
 # ------------------------------------------------------------------ analysis
-.PHONY: fuzz-libfuzzer fuzz-afl symbolic agent
+.PHONY: fuzz-libfuzzer fuzz-afl symbolic concolic facts pipeline stage brief agent
 fuzz-libfuzzer: docker/.env ## 60s libFuzzer run against the host twin
 	$(RUN) bash -c 'make -C host_twin fuzz_libfuzzer && \
 	  mkdir -p /tmp/corpus && \
@@ -61,11 +61,38 @@ fuzz-afl: docker/.env ## AFL++ run against the host twin (ctrl-C to stop)
 	  ASAN_OPTIONS=abort_on_error=1:symbolize=0:detect_leaks=0 \
 	  afl-fuzz -i /tmp/in -o /tmp/out -- ./host_twin/fuzz_afl'
 
-symbolic: docker/.env ## angr directed solve for BUG-002
-	$(RUN) python3 agent/solve_parse_config.py host_twin/target_plain 64
+# TARGET/HARNESS default to the host twin. Point them at any x86-64 ELF.
+TARGET  ?= host_twin/target_plain
+HARNESS ?= host_twin/fuzz_stdin
+STAGE   ?= chunk
+SEEDS   ?= ["4141414141414141414141414141414141414141414141414141414141414141"]
 
-agent: docker/.env ## Run the LLM agent loop (needs ANTHROPIC_API_KEY)
-	$(COMPOSE) run --rm agent
+facts: docker/.env ## Prime the whole-binary CFG cache (~130s, then cached)
+	$(RUN) python3 agent/toolcli.py binary_facts '{"binary":"$(TARGET)"}'
+
+symbolic: docker/.env ## Directed symbolic execution over one chunk (CHUNK=...)
+	$(RUN) python3 agent/toolcli.py symex_chunk \
+	  '{"binary":"$(TARGET)","chunk":{"chunk_id":"manual","members":["parse_config"],\
+	    "entry":"parse_config","args":[{"name":"in","kind":"sym_buf","size":64},\
+	    {"name":"len","kind":"concrete","value":64}]}}'
+
+concolic: docker/.env ## Concolic execution from a seed, replayed under ASan
+	$(RUN) python3 agent/toolcli.py concolic_chunk \
+	  '{"binary":"$(TARGET)","harness":"$(HARNESS)","seeds":$(SEEDS),"generations":3,\
+	    "chunk":{"chunk_id":"manual","members":["parse_config"],"entry":"parse_config",\
+	    "args":[{"name":"in","kind":"sym_buf","size":64},{"name":"len","kind":"seed_len"}],\
+	    "poc_prefix_hex":"00"}}'
+
+pipeline: docker/.env ## Run all five agent stages (needs ANTHROPIC_API_KEY)
+	$(COMPOSE) run --rm agent python3 pipeline.py --target /work/$(TARGET) --harness /work/$(HARNESS)
+
+stage: docker/.env ## Run one stage: make stage STAGE=chunk
+	$(COMPOSE) run --rm agent python3 pipeline.py --stage $(STAGE) --target /work/$(TARGET)
+
+brief: docker/.env ## Print a stage brief for a subagent: make brief STAGE=concolic
+	$(RUN) python3 agent/pipeline.py --brief $(STAGE) --target /work/$(TARGET)
+
+agent: pipeline ## Alias for `pipeline`
 
 # --------------------------------------------------------------------- esp32
 .PHONY: esp32-build esp32-qemu

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Score an agent run against the answer key (README step 17).
 
-    python3 scripts/score.py agent/findings.json
+    python3 scripts/score.py agent/artifacts/findings.json
 
 Matches on the function name at the defect site, which is stable across
 line-number drift. Reports bugs found (weighted by difficulty), false
@@ -14,6 +14,7 @@ validated PoC" rule therefore cannot report it, and the achievable maximum is
 below 3/3. That is a property of the testbed, not of the agent.
 """
 import json
+import os
 import sys
 
 WEIGHT = {"easy": 1, "medium": 2, "hard": 3}
@@ -21,7 +22,11 @@ WEIGHT = {"easy": 1, "medium": 2, "hard": 3}
 
 def main():
     gt_path = "ground_truth.json"
-    fi_path = sys.argv[1] if len(sys.argv) > 1 else "agent/findings.json"
+    # The pipeline writes to agent/artifacts/; the pre-pipeline runs wrote to
+    # agent/findings.json. Prefer the new location, fall back to the old.
+    defaults = ["agent/artifacts/findings.json", "agent/findings.json"]
+    fi_path = (sys.argv[1] if len(sys.argv) > 1
+               else next((d for d in defaults if os.path.exists(d)), defaults[0]))
     gt = json.load(open(gt_path))
     fi = json.load(open(fi_path))
     findings = fi.get("findings", [])
