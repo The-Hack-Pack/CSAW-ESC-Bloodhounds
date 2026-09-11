@@ -170,6 +170,18 @@ unversioned `xtensa-esp-elf-gdb` does not exist — the binary is
 ```bash
 xtensa-esp32-elf-gdb -batch -x interleave.gdb build/esc26_testbed.elf
 ```
+`scripts/esp32_interleave.sh` runs this non-interactively (boots qemu with the
+gdbstub, waits for :3333, drives the script, tears qemu down):
+```bash
+docker compose -f docker/docker-compose.yml run --rm -T esp32 \
+    bash /work/scripts/esp32_interleave.sh
+```
+Re-verified on arm64 this session (2026-09-11): firmware builds clean, boots
+under qemu as a multicore app logging `esc26 testbed up`, and the driver fills
+the 16-byte `local[]` with `0x41` past its bound after firing
+`rfid_isr_handler(64)` inside the window — BUG-001 on Xtensa, no source
+instrumentation.
+
 It primes `g_len` with a legal 8-byte frame so the consumer passes its own
 CHECK, breaks between the CHECK and the USE, fires `rfid_isr_handler(64)`
 inside that window, and dumps the stack either side of the `memcpy`. The

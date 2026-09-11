@@ -54,8 +54,10 @@ must be measured against.
 ## Caveats (kept honest)
 
 - These are *host-twin* measurements. BUG-001's Xtensa confirmation is the
-  `interleave.gdb` witness (README step 13); hardware confirmation still needs
-  the kit.
+  `interleave.gdb` witness — re-run this session via
+  `scripts/esp32_interleave.sh` (firmware builds clean, boots under qemu, and
+  the ISR-in-window fires a 0x41 overrun of `local[16]`). Hardware confirmation
+  on the real board still needs the kit.
 - "Unreachable by construction" is a property of the current fuzz harness. If
   `net_task`/`fuzz_entry` were given a path into `handle_frame`, the statement
   would need re-checking — the script re-derives it from the source each run.
