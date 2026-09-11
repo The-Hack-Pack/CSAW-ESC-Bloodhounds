@@ -15,14 +15,43 @@ Not executed in the environment where this scaffold was produced (no key).
 import argparse
 import json
 import os
+import re
 import sys
 
 import tools
 
-try:
-    from anthropic import Anthropic, AuthenticationError
-except ImportError:
-    sys.exit("pip install anthropic")
+
+def extract_findings_blob(text: str) -> dict:
+    """Pull a scorer-shaped object out of the model's final message.
+
+    The scorer expects {"findings": [...], ...}. Models tend to wrap that in
+    prose or a ```json fence, or emit a bare array. Recover all three so a live
+    run always produces a scorable file (or a diagnostic one, never silent
+    garbage). Returns a dict with at least a "findings" list.
+    """
+    candidates = []
+    # 1. fenced ```json ... ``` blocks (last one wins -- usually the summary)
+    candidates += re.findall(r"```(?:json)?\s*(.*?)```", text, re.S)
+    # 2. the whole message, and the outermost {...} / [...] spans
+    candidates.append(text)
+    for m in re.finditer(r"(\{.*\}|\[.*\])", text, re.S):
+        candidates.append(m.group(1))
+
+    for blob in reversed(candidates):
+        blob = blob.strip()
+        if not blob:
+            continue
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, list):
+            return {"findings": obj}
+        if isinstance(obj, dict) and "findings" in obj:
+            return obj
+    # Nothing parsed -- preserve the raw text so the run is diagnosable.
+    return {"findings": [], "parse_error": "no JSON findings object recovered",
+            "raw": text[:8000]}
 
 CRED_HELP = """FATAL: no Anthropic credentials resolved.
 
@@ -85,6 +114,13 @@ def main():
     ap.add_argument("--out", default="findings.json")
     args = ap.parse_args()
 
+    # Imported here, not at module top, so the module (and extract_findings_blob)
+    # is testable without the SDK installed.
+    try:
+        from anthropic import Anthropic, AuthenticationError
+    except ImportError:
+        sys.exit("pip install anthropic")
+
     # Do NOT hard-require ANTHROPIC_API_KEY. The SDK resolves credentials in
     # order: ANTHROPIC_API_KEY -> ANTHROPIC_AUTH_TOKEN -> the OAuth profile
     # from `ant auth login` -> workload identity -> the default profile on
@@ -104,6 +140,7 @@ def main():
                  "Analyze the target. Start by listing the files."}]
 
     turns = 0
+    tool_calls = 0
     in_tok = out_tok = 0
     while turns < args.budget:
         turns += 1
@@ -141,6 +178,7 @@ def main():
             if block.type != "tool_use":
                 continue
             print(f"  -> {block.name}({json.dumps(block.input)[:160]})")
+            tool_calls += 1
             out = tools.call(block.name, block.input)
             results.append({
                 "type": "tool_result",
@@ -149,13 +187,24 @@ def main():
             })
         messages.append({"role": "user", "content": results})
 
-    print(f"\n=== {turns} turns, {in_tok} in / {out_tok} out tokens ===")
+    print(f"\n=== {turns} turns, {tool_calls} tool calls, "
+          f"{in_tok} in / {out_tok} out tokens ===")
 
-    # Persist the last text block for scoring.
+    # Persist a scorer-shaped findings file, not the raw model text. The scorer
+    # reads {"findings": [...], "tool_calls_used": N}; recover that from the
+    # final message and stamp the run metadata the scorer reports.
     final = "".join(b.text for b in resp.content if b.type == "text")
+    out = extract_findings_blob(final)
+    out.setdefault("run", f"run_agent.py {args.model}, {turns} turns")
+    out["tool_calls_used"] = tool_calls
+    out["tokens"] = {"in": in_tok, "out": out_tok}
     with open(args.out, "w") as f:
-        f.write(final)
-    print(f"wrote {args.out}")
+        json.dump(out, f, indent=2)
+    n = len(out.get("findings", []))
+    if out.get("parse_error"):
+        print(f"WARNING: {out['parse_error']}; wrote {args.out} with raw text "
+              "preserved for inspection.")
+    print(f"wrote {args.out} ({n} finding(s), {tool_calls} tool calls)")
 
 
 if __name__ == "__main__":
