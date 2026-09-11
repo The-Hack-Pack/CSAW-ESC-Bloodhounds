@@ -9,7 +9,11 @@ once validate_poc() returns crashed=True.
 import json
 import os
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import oracles  # noqa: E402  -- the generalized, typed-evidence gate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TWIN = os.path.join(ROOT, "host_twin")
@@ -86,8 +90,11 @@ def run_cred_race(iters: int = 20, widen: int = 1) -> dict:
 
 
 def validate_poc(poc_hex: str) -> dict:
-    """THE GATE. Feed a candidate input to the ASan harness. A finding without
-    crashed=True is a hypothesis, not a vulnerability."""
+    """THE CRASH GATE. Feed a candidate input to the ASan harness. A finding
+    without crashed=True is a hypothesis, not a vulnerability. This recognises
+    exactly one class of proof -- a memory-safety abort from stdin. For
+    non-crash proofs (privilege escalation, races) use validate_evidence or
+    run_oracle."""
     data = bytes.fromhex(poc_hex)
     r = _run([os.path.join(TWIN, "fuzz_stdin")], stdin_bytes=data)
     combined = r["stdout"] + r["stderr"]
@@ -97,6 +104,33 @@ def validate_poc(poc_hex: str) -> dict:
         "signal_or_rc": r["rc"],
         "sanitizer_report": combined[:4000] if crashed else "",
     }
+
+
+def validate_evidence(evidence: dict) -> dict:
+    """THE GENERALIZED GATE. Validate a finding through typed evidence and get
+    back a machine-readable verdict (passed, reproduction_rate, artifacts).
+
+    `evidence` is a dict with a `type` field, one of:
+      crash               {poc_hex|cmd, expect_site?}
+      race_report         {cmd?, expect_site?}
+      security_oracle     {cmd, insecure_when}
+      trace_assertion     {cmd, assert_regex, forbid_regex?}
+      differential_oracle {control:{cmd}, test:{cmd}, insecure_when, trials?}
+
+    A differential oracle passes only when the control is secure on every
+    trial AND the test reproduces the insecure state -- so a bug whose control
+    is already insecure is a hard FAIL, not a pass. This is how non-crash
+    findings such as BUG-003 privilege escalation become gate-enforced rather
+    than self-asserted."""
+    return oracles.validate(evidence)
+
+
+def run_oracle(name: str) -> dict:
+    """Run one of the canonical per-bug evidence specs (oracles.ORACLES) and
+    return the gate verdict. Names: bug001_frame_toctou_overflow,
+    bug002_parse_config_overflow, bug003_credential_toctou. Use this to obtain
+    a reproducible witness the scorer will re-check."""
+    return oracles.validate_named(name)
 
 
 # ------------------------------------------------------------------- symbolic
@@ -128,9 +162,16 @@ SCHEMAS = [
     {"name": "run_cred_race", "description": "Drive the I2C credential store with a concurrent writer and report whether check_credential grants admin for a non-admin record, against a sequential control.",
      "input_schema": {"type": "object", "properties": {
          "iters": {"type": "integer"}, "widen": {"type": "integer"}}}},
-    {"name": "validate_poc", "description": "Required before reporting any finding. Runs a hex-encoded input against the ASan harness and reports whether it actually crashed.",
+    {"name": "validate_poc", "description": "The crash gate. Runs a hex-encoded input against the ASan harness and reports whether it actually crashed. Use for memory-safety bugs reachable from stdin.",
      "input_schema": {"type": "object", "properties": {"poc_hex": {"type": "string"}},
                       "required": ["poc_hex"]}},
+    {"name": "validate_evidence", "description": "The generalized gate. Validate a finding through typed evidence (crash, race_report, security_oracle, trace_assertion, differential_oracle) and get a machine-readable verdict with reproduction rate and stored artifacts. Use for non-crash proofs such as privilege escalation, where a differential control/test pair isolates concurrency as the cause.",
+     "input_schema": {"type": "object", "properties": {
+         "evidence": {"type": "object", "description": "Evidence spec with a 'type' field; see the tool docstring for per-type fields."}},
+                      "required": ["evidence"]}},
+    {"name": "run_oracle", "description": "Run a canonical per-bug evidence spec by name and return the gate verdict. Names: bug001_frame_toctou_overflow, bug002_parse_config_overflow, bug003_credential_toctou.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}},
+                      "required": ["name"]}},
 ]
 
 DISPATCH = {
@@ -142,6 +183,8 @@ DISPATCH = {
     "symbolic_solve": symbolic_solve,
     "run_cred_race": run_cred_race,
     "validate_poc": validate_poc,
+    "validate_evidence": lambda **k: validate_evidence(k.get("evidence", k)),
+    "run_oracle": run_oracle,
 }
 
 

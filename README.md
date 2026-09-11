@@ -284,9 +284,24 @@ no-unvalidated-findings rule was capped at 4/6. `run_cred_race()` now supplies
 the concurrent writer, and the oracle is a **pair**: a sequential control that
 must return 0 escalations in 500 checks, against a concurrent run that grants
 admin for a record whose stored role is `0x00`. The concurrent count alone
-proves nothing; it is the pair that isolates concurrency as the cause. Still
-open: `validate_poc` has no oracle mode, so the toolkit now has two classes of
-proof and only one gate enforces either.
+proves nothing; it is the pair that isolates concurrency as the cause.
+
+**RESOLVED 2026-09-11 — the gate now has an oracle mode.** `agent/oracles.py`
+is a typed-evidence validation engine: a finding declares evidence of type
+`crash`, `race_report`, `security_oracle`, `trace_assertion`, or
+`differential_oracle`, and the engine re-runs it for a machine-readable
+verdict (`passed`, `reproduction_rate`, stored `artifacts`). BUG-003 is now a
+first-class `differential_oracle` (`bug003_credential_toctou`): it passes only
+when the sequential control is secure on every trial **and** the concurrent
+test reproduces the escalation — so a control that is already insecure is a
+hard FAIL, not a pass. `scripts/score.py` re-runs each finding's oracle at
+score time, so a bug is credited on a witness the gate re-checks rather than a
+self-asserted `"validated": true`. With this, all three planted bugs are
+gate-provable and the 4/6 cap is gone (6/6 on run 2). The engine is wired into
+the toolkit as `validate_evidence` and `run_oracle`, and `agent/test_oracles.py`
+proves the gate *rejects* non-proofs (benign input, wrong crash site, an
+already-insecure control, a non-reproducing test). `validate_poc` is unchanged
+and remains the crash-only fast path.
 
 **`g_widen_window` is not required for BUG-001.** `./host_twin/target_asan
 race 3000000 0` crashes in `handle_frame` with the hook off -- verified 3/3.
@@ -326,6 +341,17 @@ Four corrections worth carrying forward:
   `if (n)` with `n` hard-coded to 0, so dead-code removal drops it. Anything
   reasoning about the ELF (Ghidra, symbol-based tooling) will not find it —
   give `net_task` a real input path before relying on that.
+
+One portability fix carried in since (2026-09-11, verified on Apple-Silicon /
+Docker Desktop arm64): `agent/solve_parse_config.py` matched only the x86
+`call` mnemonic to find the `memcpy` call site, so on an aarch64 host — where
+the same static binary emits `bl` — the angr track found no call site and
+printed nothing (baseline track 4 silently blank). It now matches `call`/`bl`/
+`blr`/`jal`/`jalr` and recovers the `0xC0` magic plus an over-32 length field
+on both arches. Everything in the four-track sweep now reproduces on
+`ubuntu:24.04` under an arm64 Docker VM, including the TSan race (shadow
+mapping succeeded without a `vm.mmap_rnd_bits` change on this kernel; keep the
+sysctl step for x86 hosts, where it is still intermittent).
 
 Still not verified: hardware (step 14, needs the kit), and `run_agent.py`'s
 actual agent loop and scoring, which need an `ANTHROPIC_API_KEY`. Everything

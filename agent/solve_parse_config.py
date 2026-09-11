@@ -38,13 +38,20 @@ cfg = proj.analyses.CFGFast(
 )
 fn = cfg.functions.get(sym_fn.rebased_addr)
 targets = []
+# Match a direct call across ISAs, not just x86. The reference machine was
+# x86-64 ('call'); on Apple Silicon / any aarch64 host the same static binary
+# emits 'bl' for the memcpy call, and the original 'call'-only match found
+# nothing and aborted the whole angr track. Cover the common lifters angr
+# supports so the solve reproduces regardless of who runs it.
+CALL_MNEMONICS = {"call", "bl", "blr", "jal", "jalr", "blx", "callr"}
 for blk in fn.blocks:
     for ins in blk.capstone.insns:
-        if ins.mnemonic == "call":
+        if ins.mnemonic in CALL_MNEMONICS:
             targets.append(ins.address)
 
 if not targets:
-    sys.exit("no call site found in parse_config")
+    sys.exit("no call site found in parse_config (checked mnemonics: %s)"
+             % ", ".join(sorted(CALL_MNEMONICS)))
 
 simgr = proj.factory.simulation_manager(state)
 simgr.explore(find=targets[-1], num_find=1)
