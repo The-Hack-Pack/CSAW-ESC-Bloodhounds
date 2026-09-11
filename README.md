@@ -214,6 +214,19 @@ delta. In AIxCC, parallel fuzzing alone solved 54% of the bugs — if you don't
 measure your own equivalent, a judge will reasonably ask whether the LLM did
 anything.
 
+`scripts/baselines.sh` does this and writes a machine-readable
+`agent/baselines.json`:
+```bash
+docker compose -f docker/docker-compose.yml run --rm -T analysis \
+    bash scripts/baselines.sh agent/baselines.json
+```
+Measured (see `docs/EVIDENCE.md` for the full matrix): libFuzzer finds BUG-002
+in ~15k executions; it never reaches BUG-001 (the stdin harness has no path to
+`handle_frame`) and gets 0 escalations on BUG-003 in 20k sequential checks
+(the escalation needs the concurrent writer); angr recovers the `0xC0` guard in
+one directed solve; the typed gate reproduces all three. No single tool covers
+all three — that gap is the argument for the toolkit.
+
 ---
 
 ## Phase E — extend

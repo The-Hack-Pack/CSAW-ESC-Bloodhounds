@@ -1,0 +1,9 @@
+{
+  "fuzz_budget_seconds": 45,
+  "libfuzzer_bug002": {"crashed": true, "function": "parse_config", "executions": "14924"},
+  "seqfuzz_bug001": {"reachable": false, "reason": "harness never calls handle_frame/run_race"},
+  "seqfuzz_bug003": {"code_reachable": true, "escalatable_sequentially": false,
+                     "reason": "privilege escalation needs a concurrent EEPROM writer"},
+  "angr_bug002": {"magic": "0xC0", "overflow": "OVERFLOW"},
+  "typed_gate": {"oracles_passing": 3, "of": 3}
+}
